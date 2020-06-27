@@ -3,4 +3,8 @@ class ParseController < ApplicationController
   result = `python3 parselog --json #{params[:id].to_i}`
   render json: result
  end
+ 
+ def ping
+   render json: {ok: true}
+ end
 end
