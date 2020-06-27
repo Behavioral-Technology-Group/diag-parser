@@ -1,3 +1,3 @@
 Rails.application.routes.draw do
-  post root, to: "parse#create"
+  post "/", to: "parse#create"
 end
