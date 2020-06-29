@@ -14,7 +14,7 @@ import sys
 import time
 
 
-version = '1.0'
+version = '1.0.2'
 
 log = logging.getLogger()
 
@@ -217,7 +217,7 @@ class TimestampRecord(Record):
     rtype = 1   # LREC_TIMESTAMP
 
     def parse(self):
-        value = struct.unpack('<L', self.data)[0]
+        value = struct.unpack_from('<L', self.data)[0]
         self._ts = dt.datetime.fromtimestamp(value)
         # if self._ts < dt.datetime(2018, 1, 1, 0, 0):
         #     later = max(Record._ts + dt.timedelta(seconds=Record._tocks / 64),
@@ -242,16 +242,18 @@ class RebootRecord(Record):
     rtype = 2   # LREC_REBOOT
 
     REASONS = {
-        1: 'hard-reset',
-        2: 'watchdog',
-        4: 'soft-reset',
-        8: 'lockup',
-        16: 'off-mode',
+        (1 << 0): 'hard-reset',
+        (1 << 1): 'watchdog',
+        (1 << 2): 'soft-reset',
+        (1 << 3): 'lockup',
+        (1 << 4): 'bit4',
+        (1 << 5): 'bit5',
+        (1 << 6): 'hibernate',  # RESET_SYSTEM_OFF_MODE in main.c
     }
 
     def parse(self):
         code = self.data[0]
-        if code == 0x80:
+        if code == (1 << 7):    # RESET_SHUTDOWN_BIT in main.c
             reason = 'shutdown'
             rtext = ''
             self.fields['name'] = 'Shutdown'
@@ -292,7 +294,7 @@ class ButtonRecord(Record):
     }
 
     def parse(self):
-        b0, b1 = struct.unpack('BB', self.data)
+        b0, b1 = struct.unpack_from('BB', self.data)
         try:
             action = self.ACTIONS[b0]
         except KeyError:
@@ -319,7 +321,7 @@ class ZapRecord(Record):
 
     def parse(self):
         if len(self.data) > 1:
-            b0, b1, b2, b3, b4, b5 = struct.unpack('BBBBBB', self.data)
+            b0, b1, b2, b3, b4, b5 = struct.unpack_from('BBBBBB', self.data)
             target = (b0 & 0xf) * 10
             charged = bool(b0 & 0x10)
             skipped = bool(b0 & 0x20)
@@ -378,7 +380,7 @@ class ConnectRecord(Record):
     rtype = 5   # LREC_CONNECT
 
     def parse(self):
-        mac, ci = struct.unpack('<6sH', self.data)
+        mac, ci = struct.unpack_from('<6sH', self.data)
         mac = ':'.join('%02X' % x for x in bytearray(mac))
 
         self._text = f'mac={mac} ci={ci}ms'
@@ -399,9 +401,10 @@ class TimeDeltaRecord(Record):
     rtype = 7   # LREC_TIME_DELTA
 
     def parse(self):
-        delta = struct.unpack('<l', self.data)[0]
+        delta = struct.unpack_from('<l', self.data)[0]
         if delta > since2017.total_seconds():
-            dtext = f'({delta/365.25:.0f} days: RTC was reset)'
+            # dtext = f'({delta/365.25:.0f} days: RTC was reset)'
+            dtext = f'({dt.timedelta(seconds=delta)}: RTC was reset)'
         elif delta > 90:
             text = str(dt.timedelta(seconds=delta))
             dtext = f'{text} ({delta:+}s)'
@@ -418,7 +421,7 @@ class BatteryRecord(Record):
     rtype = 8   # LREC_BATTERY
 
     def parse(self):
-        voltage = struct.unpack('<H', self.data)[0]
+        voltage = struct.unpack_from('<H', self.data)[0]
         vusb = bool(voltage & 0x8000)
         if vusb and bool(voltage & 0x4000):
             charged = True
@@ -450,7 +453,7 @@ class CatRecord(Record):
     rtype = 10   # LREC_CAT
 
     def parse(self):
-        level, = struct.unpack('<H', self.data)
+        level, = struct.unpack_from('<H', self.data)
         fast = bool(level & 0x8000)
         level &= 0x7fff
 
@@ -551,7 +554,7 @@ class SleepEndRecord(Record):
     # Removed in 5.6.60
 
     def add_repr(self, r):
-        r.append(' reason=%d' % struct.unpack('B', self.data)[0])
+        r.append(' reason=%d' % struct.unpack_from('B', self.data)[0])
 
 
 
@@ -559,13 +562,20 @@ class AlarmLoadRecord(Record):
     rtype = 15  # LREC_ALARM_LOAD
 
     def parse(self):
-        delta = struct.unpack('<H', self.data)[0] * 10
+        if len(self.data) >= 4:
+            delta, aid = struct.unpack_from('<HH', self.data)
+        else:
+            delta, = struct.unpack_from('<H', self.data)
+            aid = 0
+
+        delta *= 10
         dtime = dt.timedelta(seconds=delta)
         alarm_time = (self._ts + dtime).replace(microsecond=0)
 
-        self._text = f'delta={dtime} (at ~{alarm_time})'
+        self._text = f'#{aid} delta={dtime} (at ~{alarm_time})'
 
         return dict(
+            aid=aid,
             delta=delta,
             alarm_time=str(alarm_time),
             )
@@ -576,7 +586,14 @@ class AlarmTriggerRecord(Record):
     rtype = 16  # LREC_ALARM_TRIGGER
 
     def parse(self):
-        fields = struct.unpack('BBBBBB', self.data)
+        # breakpoint()
+        if len(self.data) >= 8:
+            fields = struct.unpack_from('<BBBBBBH', self.data)
+            aid = fields[-1]
+            fields = fields[:-1]
+        else:
+            fields = struct.unpack_from('BBBBBB', self.data)
+            aid = 0
         ctrl = fields[0]
         snooze = fields[1]
         pretrigger = bool(fields[2] & 0x80)
@@ -586,11 +603,11 @@ class AlarmTriggerRecord(Record):
 
         pre = f' pre={pre_delay}s' if pretrigger else ''
         self._text = (
-            f'c={ctrl} sn={snooze}{pre}'
+            f'#{aid} c={ctrl} sn={snooze}{pre}'
             f' d={duration}s i={interval}s'
             )
 
-        return extract('ctrl snooze pretrigger pre_delay duration interval', locals())
+        return extract('aid ctrl snooze pretrigger pre_delay duration interval', locals())
 
 
 
@@ -618,7 +635,7 @@ class FileDumpRecord(Record):
     rtype = 22  # LREC_FILE_DUMP
 
     def parse(self):
-        ftype, flen = struct.unpack('<BL', self.data)
+        ftype, flen = struct.unpack_from('<BL', self.data)
         self._text = f't={ftype} n={flen}'
         return extract('ftype flen', locals())
 
@@ -630,7 +647,7 @@ class ConfigRecord(Record):
     def parse(self):
         # 17 09 03 17 00 01 0A 01 0A 03 00
         (button, hd_ctrl, hd_select, motor_ctrl, motor_level,
-            piezo_ctrl, piezo_level, zap_ctrl, zap_level) = struct.unpack('9B', self.data)
+            piezo_ctrl, piezo_level, zap_ctrl, zap_level) = struct.unpack_from('9B', self.data)
 
         self._text = (
             f'b={button} hd=h{hd_ctrl:02x}:h{hd_select:02x}'
@@ -657,7 +674,7 @@ class JumpingJackRecord(Record):
 
     def parse(self):
         # 00 7C10 2708 CCF6 8514 AF31 94F3 0A00 FC03 EC00
-        fields = struct.unpack('<B3hhHhHHH', self.data)
+        fields = struct.unpack_from('<B3hhHhHHH', self.data)
         (self.valid, self.x, self.y, self.z,
             self.x_mean, self.y_span, self.z_mean,
             self.count, self.period, self.cycles,
@@ -679,7 +696,7 @@ class VibeRecord(Record):
     def parse(self):
         skip = bool(len(self.data) == 1)
         if skip:
-            code = struct.unpack_from('B', self.data)[0]
+            code, = struct.unpack_from('B', self.data)
             reason = {
                 0: 'VIBE_OKAY',
                 1: 'ZERO_PARAM',
@@ -692,7 +709,7 @@ class VibeRecord(Record):
             return extract('skip code reason', locals())
 
         else:
-            count, level, freq, duration = struct.unpack('<4B', self.data)
+            count, level, freq, duration = struct.unpack_from('<4B', self.data)
             freq *= 500     # is this correct? Compare BeepRecord
             dur = decode_duration(duration)
             # FIXME: should something here be divided by 1000?
@@ -727,7 +744,7 @@ class BeepRecord(Record):
             return extract('skip code reason', locals())
 
         else:
-            count, freq, duration = struct.unpack('<3B', self.data)
+            count, freq, duration = struct.unpack_from('<3B', self.data)
             freq = (freq // 10 - 1) * 800 + 200 # compare with VibeRecord
 
             dur = decode_duration(duration)
@@ -820,6 +837,111 @@ class FactoryRecord(Record):
             flags=flags,
             locked=locked,
             )
+
+
+
+class AncsRecord(Record):
+    rtype = 32  # LREC_ANCS
+
+    # Event:
+    # 11:53:16.328 (32) 28 00 01 00 08 00 00 10 09 01 00 00 00 00
+    #
+    # Event (Notification) Attributes, spread over multiple notifies:
+    # 11:53:16.375 (32) 2B 00 01 00 14 00   00 00 00 00 00 00 16 00 63 6F 6D 2E 74 69 6E 79 73 70 65 63
+    #   -> b'\x16\x00com.tinyspec'
+    # 11:53:16.375 (32) 2B 00 01 00 14 00   6B 2E 63 68 61 74 6C 79 69 6F 01 05 00 53 6C 61 63 6B 02 00
+    #   -> b'k.chatlyio\x01\x05\x00Slack\x02\x00'
+    # 11:53:16.390 (32) 2B 00 01 00 14 00   00 03 14 00 40 50 65 74 65 72 20 48 61 6E 73 65 6E 3A 20 70
+    #   -> b'\x00\x03\x14\x00@Peter Hansen: p'
+    # 11:53:16.390 (32) 2B 00 01 00 14 00   69 6F 6E 67 04 02 00 32 30 05 0F 00 32 30 32 30 30 36 31 37
+    #   -> b'iong\x04\x02\x0020\x05\x0f\x0020200617'
+    # 11:53:16.390 (32) 2B 00 01 00 12 00   54 31 31 35 33 31 34 06 00 00 07 05 00 43 6C 65 61 72
+    #   -> b'T115314\x06\x00\x00\x07\x05\x00Clear'
+    #
+    # App attributes:
+    # 11:53:16.562 (32) 2B 00 01 00 14 00   01 63 6F 6D 2E 74 69 6E 79 73 70 65 63 6B 2E 63 68 61 74 6C
+    #   -> b'\x01com.tinyspeck.chatl'
+    # 11:53:16.562 (32) 2B 00 01 00 0C 00   79 69 6F 00 00 05 00 53 6C 61 63 6B
+    #   -> b'yio\x00\x00\x05\x00Slack'
+    # So handle is first uint16_t.  0x28 is the event, 0x2B are the attribute data.
+
+    EIDS = {
+        0: 'added',
+        1: 'modified',
+        2: 'removed',
+    }
+
+    CATS = {
+        0: 'other',
+        1: 'call',
+        2: 'missed call',
+        3: 'voicemail',
+        4: 'social',
+        5: 'schedule',
+        6: 'email',
+        7: 'news',
+        8: 'health-fitness',
+        9: 'biz-finance',
+        10: 'location',
+        11: 'entertainment',
+    }
+
+    FLAGS = {
+        0x01: 'silent',
+        0x02: 'important',
+        0x04: 'pre-existing',
+        0x08: 'pos-action',
+        0x10: 'neg-action',
+    }
+
+    def parse(self):
+        if len(self.data) >= 6:
+            hnd, typ, length = struct.unpack_from('<HHH', self.data)
+            dat = {}
+            if hnd == 0x28:
+                ttext = 'event'
+                fields = struct.unpack_from('<BBBBL', self.data[6:])
+                eid = self.EIDS.get(fields[0], '?')
+                flags = '/'.join(v for k, v in self.FLAGS.items() if fields[1] & k)
+                catid = self.CATS.get(fields[2], '?')
+                ccnt = fields[3]
+                nuid = fields[4]
+                dat = dict(
+                    eid=fields[0],
+                    flags=fields[1],
+                    catid=catid,
+                    ccnt=ccnt,
+                    nuid=nuid,
+                    )
+                etext = f'{eid}, flags={flags}, cat={catid} n={ccnt}, uid={nuid}'
+                self._text = f'{ttext}: {etext}'
+
+            elif hnd == 0x2b:
+                ttext = 'attr'
+                etext = repr(bytes(self.data[6:]))
+                self._text = f'{ttext}: {etext}'
+
+            else:
+                ttext = f'0x{hnd:02x}'
+                dat = dict(type=ttext, text=repr(bytes(self.data[6:])))
+
+                self._text = f'{ttext}: {bytes(self.data[6:])}'
+
+            return dat or dict(
+                type=ttext,
+                text=etext,
+                )
+        else:
+            ttext = 'error'
+            try:
+                self._text = self.data[1:].hex()
+            except AttributeError:
+                self._text = hexlify(self.data[1:])
+
+            return dict(
+                type=ttext,
+                text=self._text,
+                )
 
 
 
