@@ -14,7 +14,7 @@ import sys
 import time
 
 
-version = '1.0.2'
+version = '1.0.3'
 
 log = logging.getLogger()
 
@@ -644,20 +644,49 @@ class FileDumpRecord(Record):
 class ConfigRecord(Record):
     rtype = 23  # LREC_CONFIG
 
+    ANGLES = [
+        22.1,   # default when 0, becomes 6+1 or 22.1 degrees
+        5.0, # 498,    //  +/- 5.0 degrees off-centre
+        7.9, # 1225,   //  +/- 7.9 degrees off-centre
+        10.7, # 2265,   // +/- 10.7 degrees off-centre
+        13.6, # 3609,   // +/- 13.6 degrees off-centre
+        16.4, # 5242,   // +/- 16.4 degrees off-centre
+        19.3, # 7149,   // +/- 19.3 degrees off-centre
+        22.1, # 9310,   // +/- 22.1 degrees off-centre
+        25.0, # 11705,  // +/- 25.0 degrees off-centre
+        27.9, # 14309,  // +/- 27.9 degrees off-centre
+        30.7, # 17097,  // +/- 30.7 degrees off-centre
+        33.6, # 20040,  // +/- 33.6 degrees off-centre
+        36.4, # 23109,  // +/- 36.4 degrees off-centre
+        39.3, # 26275,  // +/- 39.3 degrees off-centre
+        42.1, # 29505,  // +/- 42.1 degrees off-centre
+        45.0, # 32768,  // +/- 45.0 degrees off-centre
+        ]
+
     def parse(self):
         # 17 09 03 17 00 01 0A 01 0A 03 00
-        (button, hd_ctrl, hd_select, motor_ctrl, motor_level,
-            piezo_ctrl, piezo_level, zap_ctrl, zap_level) = struct.unpack_from('9B', self.data)
+        (button, hd_ctrl, hd_select, motor_cnt, motor_level,
+            piezo_cnt, piezo_level, zap_cnt, zap_level) = struct.unpack_from('9B', self.data)
+
+        button = {0: 'invalid', 1: 'vibe', 2: 'beep', 3: 'zap'}.get(button, '?')
+
+        dtap = 'on' if (hd_ctrl & (1 << 1)) else 'off'
+        if hd_ctrl & (1 << 0):
+            orient = f'{"front" if hd_ctrl & (1 << 3) else "back"} {"left" if hd_ctrl & (1 << 4) else "right"}'
+            angle = self.ANGLES[hd_select >> 4]
+            hd = f'{orient}, {angle:.0f}° cone'
+        else:
+            hd = 'off'
 
         self._text = (
-            f'b={button} hd=h{hd_ctrl:02x}:h{hd_select:02x}'
-            f' mot={motor_ctrl}:{motor_level}'
-            f' pzo={piezo_ctrl}:{piezo_level}'
-            f' zap={zap_ctrl}:{zap_level}'
+            f'button={button} hd=[hd {hd}; dtap {dtap}]'
+            f' mot={motor_cnt}@{motor_level}'
+            f' pzo={piezo_cnt}@{piezo_level}'
+            f' zap={zap_cnt}@{zap_level}'
             )
 
-        return extract('button hd_ctrl hd_select motor_ctrl motor_level'
-                ' piezo_ctrl piezo_level zap_ctrl zap_level',
+        return extract('button dtap hd motor_cnt motor_level'
+                ' piezo_cnt piezo_level zap_cnt zap_level',
                 locals())
 
 
