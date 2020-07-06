@@ -14,7 +14,7 @@ import sys
 import time
 
 
-version = '1.0.3'
+version = '1.0.4'
 
 log = logging.getLogger()
 
@@ -674,18 +674,22 @@ class ConfigRecord(Record):
         if hd_ctrl & (1 << 0):
             orient = f'{"front" if hd_ctrl & (1 << 3) else "back"} {"left" if hd_ctrl & (1 << 4) else "right"}'
             angle = self.ANGLES[hd_select >> 4]
-            hd = f'{orient}, {angle:.0f}° cone'
+            # hd_ctrl = f'{orient} (dtap={dtap})'
+            hd_ctrl = f'{orient}'
+            hd_select = f'{angle:.0f}° cone'
+            hd = f'{hd_ctrl}, {hd_select}'
         else:
-            hd = 'off'
+            hd_ctrl = hd = 'off'
+            hd_select = ''
 
         self._text = (
-            f'button={button} hd=[hd {hd}; dtap {dtap}]'
+            f'button={button} hd={hd} dtap={dtap}'
             f' mot={motor_cnt}@{motor_level}'
             f' pzo={piezo_cnt}@{piezo_level}'
             f' zap={zap_cnt}@{zap_level}'
             )
 
-        return extract('button dtap hd motor_cnt motor_level'
+        return extract('button dtap hd_ctrl hd_select motor_cnt motor_level'
                 ' piezo_cnt piezo_level zap_cnt zap_level',
                 locals())
 
