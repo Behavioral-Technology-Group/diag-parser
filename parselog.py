@@ -14,7 +14,7 @@ import sys
 import time
 
 
-version = '1.0.4'
+version = '1.0.5'
 
 log = logging.getLogger()
 
@@ -876,6 +876,9 @@ class FactoryRecord(Record):
 class AncsRecord(Record):
     rtype = 32  # LREC_ANCS
 
+    _hnoti = None
+    _hdata = None
+
     # Event:
     # 11:53:16.328 (32) 28 00 01 00 08 00 00 10 09 01 00 00 00 00
     #
@@ -931,7 +934,16 @@ class AncsRecord(Record):
         if len(self.data) >= 6:
             hnd, typ, length = struct.unpack_from('<HHH', self.data)
             dat = {}
-            if hnd == 0x28:
+            if AncsRecord._hnoti is None:
+                AncsRecord._hnoti = hnd
+            elif hnd != AncsRecord._hnoti:
+                if hnd < AncsRecord._hnoti:
+                    AncsRecord._hdata = AncsRecord._hnoti
+                    AncsRecord._hnoti = hnd
+                elif AncsRecord._hdata is None:
+                    AncsRecord._hdata = hnd
+
+            if hnd == AncsRecord._hnoti:
                 ttext = 'event'
                 fields = struct.unpack_from('<BBBBL', self.data[6:])
                 eid = self.EIDS.get(fields[0], '?')
@@ -947,11 +959,13 @@ class AncsRecord(Record):
                     nuid=nuid,
                     )
                 etext = f'{eid}, flags={flags}, cat={catid} n={ccnt}, uid={nuid}'
+                # self._text = f'{ttext}: hnd=0x{hnd:x} {etext}'
                 self._text = f'{ttext}: {etext}'
 
-            elif hnd == 0x2b:
+            elif hnd == AncsRecord._hdata:
                 ttext = 'attr'
                 etext = repr(bytes(self.data[6:]))
+                # self._text = f'{ttext}: hnd=0x{hnd:x} {etext}'
                 self._text = f'{ttext}: {etext}'
 
             else:
