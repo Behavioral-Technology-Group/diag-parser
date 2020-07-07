@@ -14,7 +14,7 @@ import sys
 import time
 
 
-version = '1.0.5'
+version = '1.0.6'
 
 log = logging.getLogger()
 
@@ -874,11 +874,7 @@ class FactoryRecord(Record):
 
 
 class AncsRecord(Record):
-    rtype = 32  # LREC_ANCS
-
-    _hnoti = None
-    _hdata = None
-
+    rtype = 34  # LREC_ANCS
     # Event:
     # 11:53:16.328 (32) 28 00 01 00 08 00 00 10 09 01 00 00 00 00
     #
@@ -931,21 +927,13 @@ class AncsRecord(Record):
     }
 
     def parse(self):
-        if len(self.data) >= 6:
-            hnd, typ, length = struct.unpack_from('<HHH', self.data)
+        if len(self.data) >= 1:
             dat = {}
-            if AncsRecord._hnoti is None:
-                AncsRecord._hnoti = hnd
-            elif hnd != AncsRecord._hnoti:
-                if hnd < AncsRecord._hnoti:
-                    AncsRecord._hdata = AncsRecord._hnoti
-                    AncsRecord._hnoti = hnd
-                elif AncsRecord._hdata is None:
-                    AncsRecord._hdata = hnd
+            typ, = struct.unpack_from('<B', self.data)
 
-            if hnd == AncsRecord._hnoti:
+            if typ == 0:
                 ttext = 'event'
-                fields = struct.unpack_from('<BBBBL', self.data[6:])
+                fields = struct.unpack_from('<BBBBL', self.data[1:])
                 eid = self.EIDS.get(fields[0], '?')
                 flags = '/'.join(v for k, v in self.FLAGS.items() if fields[1] & k)
                 catid = self.CATS.get(fields[2], '?')
@@ -962,17 +950,17 @@ class AncsRecord(Record):
                 # self._text = f'{ttext}: hnd=0x{hnd:x} {etext}'
                 self._text = f'{ttext}: {etext}'
 
-            elif hnd == AncsRecord._hdata:
+            elif typ == 1:
                 ttext = 'attr'
-                etext = repr(bytes(self.data[6:]))
+                etext = repr(bytes(self.data[1:]))
                 # self._text = f'{ttext}: hnd=0x{hnd:x} {etext}'
                 self._text = f'{ttext}: {etext}'
 
             else:
-                ttext = f'0x{hnd:02x}'
-                dat = dict(type=ttext, text=repr(bytes(self.data[6:])))
+                ttext = f'{typ}'
+                dat = dict(type=ttext, text=repr(bytes(self.data[1:])))
 
-                self._text = f'{ttext}: {bytes(self.data[6:])}'
+                self._text = f'{ttext}: {bytes(self.data[1:])}'
 
             return dat or dict(
                 type=ttext,
