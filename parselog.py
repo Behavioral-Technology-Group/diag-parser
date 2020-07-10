@@ -14,7 +14,7 @@ import sys
 import time
 
 
-version = '1.0.6'
+version = '1.0.7'
 
 log = logging.getLogger()
 
@@ -570,7 +570,7 @@ class AlarmLoadRecord(Record):
 
         delta *= 10
         dtime = dt.timedelta(seconds=delta)
-        alarm_time = (self._ts + dtime).replace(microsecond=0)
+        alarm_time = dt.datetime.fromtimestamp(round((self._ts + dtime).timestamp() / 60) * 60)
 
         self._text = f'#{aid} delta={dtime} (at ~{alarm_time})'
 
