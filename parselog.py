@@ -14,7 +14,7 @@ import sys
 import time
 
 
-version = '1.0.7'
+version = '1.0.8'
 
 log = logging.getLogger()
 
@@ -330,8 +330,13 @@ class ZapRecord(Record):
             exit = b3 * 2
             tchg = b4 * 4
             trel = b5 * 4
+            if charged:
+                chgtext = f'{tchg:3}ms'
+            else:
+                chgtext = '(NOT)'
+                tchg = 0
             self._text = (
-                f'{target:3}% chg={tchg:3}ms r={release:3}V'
+                f'{target:3}% chg={chgtext} r={release:3}V'
                 f' rel={trel:3}ms x={exit:3}V{"SKIP" if skipped else ""}'
                 f' @{battv:.3}V'
                 )
