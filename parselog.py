@@ -14,7 +14,7 @@ import sys
 import time
 
 
-version = '1.0.8'
+version = '1.0.9'
 
 log = logging.getLogger()
 
@@ -321,7 +321,19 @@ class ZapRecord(Record):
 
     def parse(self):
         if len(self.data) > 1:
-            b0, b1, b2, b3, b4, b5 = struct.unpack_from('BBBBBB', self.data)
+            names = []
+            if len(self.data) >= 9:
+                b0, b1, b2, b3, b4, b5, b6, b7, b8 = struct.unpack_from('BBBBBBBBB', self.data)
+                t10 = b6 * 4
+                minv = b7 * 2
+                maxv = b8 * 2
+                extra = f' t10={t10:3}ms min={minv:3}V max={maxv:3}V'
+                extras = dict(t10=t10, minv=minv, maxv=maxv)
+            else:
+                b0, b1, b2, b3, b4, b5 = struct.unpack_from('BBBBBB', self.data)
+                extra = ''
+                extras = {}
+
             target = (b0 & 0xf) * 10
             charged = bool(b0 & 0x10)
             skipped = bool(b0 & 0x20)
@@ -337,19 +349,13 @@ class ZapRecord(Record):
                 tchg = 0
             self._text = (
                 f'{target:3}% chg={chgtext} r={release:3}V'
-                f' rel={trel:3}ms x={exit:3}V{"SKIP" if skipped else ""}'
+                f' rel={trel:3}ms{extra} x={exit:3}V{"SKIP" if skipped else ""}'
                 f' @{battv:.3}V'
                 )
-                # '%3d%% chg=%3dms r=%3dV rel=%3dms x=%3dV%s @%.3fV' % (
-                # self.target,
-                # self.tchg,
-                # self.release,
-                # self.trel,
-                # self.exit,
-                # ' SKIP' if self.skipped else '',
-                # self.battv))
 
-            return extract('target charged skipped battv release exit tchg trel', locals())
+            results = extract('target charged skipped battv release exit tchg trel', locals())
+            results.update(extras)
+            return results
 
         else:
             code = struct.unpack_from('B', self.data)[0]
