@@ -14,7 +14,7 @@ import sys
 import time
 
 
-version = '1.0.9'
+version = '1.1.0'
 
 log = logging.getLogger()
 
@@ -862,13 +862,37 @@ class EnergyRecord(Record):
 
 
 
-class FactoryRecord(Record):
-    rtype = 31  # LREC_FACTORY
+class FflagsRecord(Record):
+    rtype = 31  # LREC_FFLAGS
 
     def parse(self):
         if len(self.data) == 4:
             flags, = struct.unpack_from('<L', self.data)
-            locked = bool(flags >> 31)
+            amazon = bool(flags & 0x01)
+            variant = (flags >> 1) & 0x7f
+            # e.g. STC is 1 etc
+
+            self._text = f'{flags:08x} {"Amazon" if amazon else ""}'
+        else:
+            try:
+                self._text = self.data[1:].hex()
+            except AttributeError:
+                self._text = hexlify(self.data[1:])
+
+        return dict(
+            flags=flags,
+            amazon=amazon,
+            variant=variant,
+            )
+
+
+class UflagsRecord(Record):
+    rtype = 38  # LREC_UFLAGS
+
+    def parse(self):
+        if len(self.data) == 4:
+            flags, = struct.unpack_from('<L', self.data)
+            locked = bool(flags & 0x01)
 
             self._text = f'{flags:08x} {"LOCKED" if locked else ""}'
         else:
@@ -880,6 +904,27 @@ class FactoryRecord(Record):
         return dict(
             flags=flags,
             locked=locked,
+            )
+
+
+class HflagsRecord(Record):
+    rtype = 39  # LREC_HFLAGS
+
+    def parse(self):
+        if len(self.data) == 4:
+            flags, = struct.unpack_from('<L', self.data)
+            pav3 = bool(flags & 0x01)
+
+            self._text = f'{flags:08x} {"PAV3" if pav3 else ""}'
+        else:
+            try:
+                self._text = self.data[1:].hex()
+            except AttributeError:
+                self._text = hexlify(self.data[1:])
+
+        return dict(
+            flags=flags,
+            pav3=pav3,
             )
 
 
@@ -988,6 +1033,56 @@ class AncsRecord(Record):
                 type=ttext,
                 text=self._text,
                 )
+
+
+class CrashRecord(Record):
+    rtype = 36  # LREC_CRASH
+
+    def parse(self):
+        if len(self.data) == 12:
+            fault_id, pc, error = struct.unpack_from('<LLL', self.data)
+
+            self._text = f'fault={fault_id:08x} pc={pc:08x} error={error:08x}'
+        else:
+            try:
+                self._text = self.data[1:].hex()
+            except AttributeError:
+                self._text = hexlify(self.data[1:])
+
+        return extract('fault_id pc error', locals())
+
+
+
+class OtaRecord(Record):
+    rtype = 37  # LREC_OTA
+
+    CODES = {
+        0xC0: 'unlock',
+        0xC1: 'lock',
+        0xC2: 'fflags',
+        0xC3: 'hflags',
+        0xC4: 'uflags',
+        0xCB: 'blink',
+        0xCC: 'crash',
+        0xCD: 'reset',
+        0xCE: 'wipe',
+        0xCF: 'hibernate',
+    }
+
+    def parse(self):
+        if len(self.data) == 1:
+            code, = struct.unpack_from('<B', self.data)
+
+            name = self.CODES.get(code, '?')
+
+            self._text = f'code={code:02X} ({name})'
+        else:
+            try:
+                self._text = self.data[1:].hex()
+            except AttributeError:
+                self._text = hexlify(self.data[1:])
+
+        return extract('code name', locals())
 
 
 
