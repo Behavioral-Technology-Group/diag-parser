@@ -1,4 +1,4 @@
-FROM ruby:2.7
+FROM ruby:2.7.1
 RUN apt-get update && apt install -y software-properties-common
 RUN apt-add-repository -r ppa:armagetronad-dev/ppa
 RUN apt-get update -q && apt install python3.7
