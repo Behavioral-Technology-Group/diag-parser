@@ -14,7 +14,7 @@ import sys
 import time
 
 
-version = '1.1.0'
+version = '1.2.0'
 
 log = logging.getLogger()
 
@@ -86,6 +86,7 @@ class Record:
         Record._ts_base = dt.datetime(1999,1,1) # + dt.timedelta(seconds=1552474341)
         cls._tocks = 0
         cls._prev_rec = cls._rec = None
+        cls._tz_offset = dt.timedelta()
 
 
     @classmethod
@@ -218,7 +219,7 @@ class TimestampRecord(Record):
 
     def parse(self):
         value = struct.unpack_from('<L', self.data)[0]
-        self._ts = dt.datetime.fromtimestamp(value)
+        self._ts = dt.datetime.utcfromtimestamp(value) + Record._tz_offset
         # if self._ts < dt.datetime(2018, 1, 1, 0, 0):
         #     later = max(Record._ts + dt.timedelta(seconds=Record._tocks / 64),
         #         CatRecord._cat7_ts + dt.timedelta(minutes=1) * CatRecord._count)
@@ -422,7 +423,14 @@ class TimeDeltaRecord(Record):
         else:
             dtext = f'{delta:+}s'
 
-        self._text = f'delta={dtext}'
+        Record._tocks += delta * 64
+        now = Record._ts_base + dt.timedelta(seconds=Record._tocks / 64)
+        self._text = f'delta={dtext} now={now}'
+
+        # TODO: decide if we want to correct the time already on this
+        # record, or leave it as-is so we can clearly see when it occurred
+        # relative to the previous time base.
+        # self._ts = Record._ts_base + dt.timedelta(seconds=Record._tocks / 64)
 
         return dict(delta=delta)
 
@@ -506,7 +514,7 @@ class SleepRecord(Record):
             self._text = ftext
         else:
             count, duration, end = struct.unpack_from('<BHL', self.data, offset=1)
-            end = dt.datetime.fromtimestamp(end)
+            end = dt.datetime.utcfromtimestamp(end) + Record._tz_offset
             duration = dt.timedelta(seconds=duration)
             begin = end - duration
             # append(' #%d %s-%s (%s) -> %s' % (
@@ -545,6 +553,18 @@ class BluetoothRecord(Record):
         except AttributeError:
             hext = hexlify(self.data[1:])
         self._text = 'h=%d %s' % (self.data[0], hext)
+
+        # HACK: if we see a 1005 time-setting record, extract
+        # the time zone offset, if it's present, so we can
+        # adjust our local times in the output to more closely
+        # match what the user local times would have been.
+        if self.data[0] == 29:  # 1005: set time record
+            # '40200509030920f00000000000'
+            #  1 2 3 4 5 6 7 8 9
+            try:
+                Record._tz_offset = dt.timedelta(seconds=struct.unpack('b', self.data[8:9])[0] * 900)
+            except struct.error as ex:
+                pass    # probably no offset present so ignore
 
         return dict(
             handle=self.data[0],
@@ -1141,6 +1161,9 @@ class UnknownRecord(Record):
         self._name = f'Unknown({rtype})'
         super().__init__(rtype, *args, **kwargs)
 
+
+    def parse(self):
+        self._text = '%s: %s' % (bytes(self.data), self.data.hex())
 
 
 
