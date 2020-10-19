@@ -432,7 +432,7 @@ class TimeDeltaRecord(Record):
         # relative to the previous time base.
         # self._ts = Record._ts_base + dt.timedelta(seconds=Record._tocks / 64)
 
-        return dict(delta=delta)
+        return dict(delta=delta, now=str(now))
 
 
 
