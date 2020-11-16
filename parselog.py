@@ -14,7 +14,7 @@ import sys
 import time
 
 
-version = '1.2.0'
+version = '1.3.0'
 
 log = logging.getLogger()
 
@@ -87,6 +87,7 @@ class Record:
         cls._tocks = 0
         cls._prev_rec = cls._rec = None
         cls._tz_offset = dt.timedelta()
+        cls._tz_known = False
 
 
     @classmethod
@@ -190,7 +191,11 @@ class Record:
 
     def text_header(self):
         f = self.fields
-        return f'{f["ts"] or "-":^23} {f["type"]:3} {f["name"]:>12}'
+        tzk = ' ' if Record._tz_known else '*'
+        t = f'{f["ts"] or "-":^23}{tzk} {f["type"]:3} {f["name"]:>12}'
+        # if t.startswith('2020-10-26 03:36:44.921*'):
+        #     breakpoint()
+        return t
 
 
     def text_body(self):
@@ -220,10 +225,7 @@ class TimestampRecord(Record):
     def parse(self):
         value = struct.unpack_from('<L', self.data)[0]
         self._ts = dt.datetime.utcfromtimestamp(value) + Record._tz_offset
-        # if self._ts < dt.datetime(2018, 1, 1, 0, 0):
-        #     later = max(Record._ts + dt.timedelta(seconds=Record._tocks / 64),
-        #         CatRecord._cat7_ts + dt.timedelta(minutes=1) * CatRecord._count)
-        #     self._ts = later + dt.timedelta(seconds=5)
+
         Record._tocks = 0
         Record._ts_base = self._ts
 
@@ -265,7 +267,9 @@ class RebootRecord(Record):
             reason = 'power'
             rtext = 'reason=power '
 
-        if len(self.data) >= 3:
+        if len(self.data) >= 4:
+            version = '%d.%d.%d' % tuple(self.data[1:4])
+        elif len(self.data) >= 3:
             version = '5.%d.%d' % tuple(self.data[1:3])
         else:
             version = None
@@ -294,12 +298,33 @@ class ButtonRecord(Record):
         7: 'verylong',
     }
 
+    POSITION = {
+        4: 'left',
+        5: 'middle',
+        6: 'right',
+    }
+
+    SPEED = {
+        0: 'other',
+        1: 'quick',
+        2: 'short',
+        3: 'long',
+    }
+
+
     def parse(self):
         b0, b1 = struct.unpack_from('BB', self.data)
-        try:
-            action = self.ACTIONS[b0]
-        except KeyError:
-            action = f'h{b0:02x}'
+
+        action = ''
+        if b0 & 0b01110000:
+            positions = '+'.join(self.POSITION[i] for i in range(4, 7) if b0 & (1<<i))
+            speed = self.SPEED.get(b0 & 0x3, '?')
+            action = f'{speed} {positions}'
+        else:
+            try:
+                action = self.ACTIONS[b0]
+            except KeyError:
+                action = f'h{b0:02x}'
 
         if b1 < 150:
             duration = b1 * 10
@@ -407,6 +432,49 @@ class ConnectRecord(Record):
 class DisconnectRecord(Record):
     rtype = 6   # LREC_DISCONNECT
 
+    _DESC = {y: x.lower().replace('_', ' ')[len('BLE_HCI_'):] for x, y in dict(
+        BLE_HCI_STATUS_CODE_SUCCESS =                        0x00,
+        BLE_HCI_STATUS_CODE_UNKNOWN_BTLE_COMMAND =           0x01,
+        BLE_HCI_STATUS_CODE_UNKNOWN_CONNECTION_IDENTIFIER =  0x02,
+        BLE_HCI_AUTHENTICATION_FAILURE =                     0x05,
+        BLE_HCI_STATUS_CODE_PIN_OR_KEY_MISSING =             0x06,
+        BLE_HCI_MEMORY_CAPACITY_EXCEEDED =                   0x07,
+        BLE_HCI_CONNECTION_TIMEOUT =                         0x08,
+        BLE_HCI_STATUS_CODE_COMMAND_DISALLOWED =             0x0C,
+        BLE_HCI_STATUS_CODE_INVALID_BTLE_COMMAND_PARAMETERS = 0x12,
+        BLE_HCI_REMOTE_USER_TERMINATED_CONNECTION =           0x13,
+        BLE_HCI_REMOTE_DEV_TERMINATION_DUE_TO_LOW_RESOURCES = 0x14,
+        BLE_HCI_REMOTE_DEV_TERMINATION_DUE_TO_POWER_OFF =     0x15,
+        BLE_HCI_LOCAL_HOST_TERMINATED_CONNECTION =            0x16,
+        BLE_HCI_UNSUPPORTED_REMOTE_FEATURE = 0x1A,
+        BLE_HCI_STATUS_CODE_INVALID_LMP_PARAMETERS =     0x1E,
+        BLE_HCI_STATUS_CODE_UNSPECIFIED_ERROR =          0x1F,
+        BLE_HCI_STATUS_CODE_LMP_RESPONSE_TIMEOUT =       0x22,
+        BLE_HCI_STATUS_CODE_LMP_PDU_NOT_ALLOWED =        0x24,
+        BLE_HCI_INSTANT_PASSED =                         0x28,
+        BLE_HCI_PAIRING_WITH_UNIT_KEY_UNSUPPORTED =      0x29,
+        BLE_HCI_DIFFERENT_TRANSACTION_COLLISION =        0x2A,
+        BLE_HCI_CONTROLLER_BUSY =                        0x3A,
+        BLE_HCI_CONN_INTERVAL_UNACCEPTABLE =             0x3B,
+        BLE_HCI_DIRECTED_ADVERTISER_TIMEOUT =            0x3C,
+        BLE_HCI_CONN_TERMINATED_DUE_TO_MIC_FAILURE =     0x3D,
+        BLE_HCI_CONN_FAILED_TO_BE_ESTABLISHED =          0x3E,
+    ).items()}
+
+
+    def parse(self):
+        try:
+            reason, = struct.unpack_from('<B', self.data)
+            desc = self._DESC.get(reason, "?")
+            self._text = f'reason={reason} ({desc})'
+        except:
+            reason = 0
+            self._text = f'reason=?'
+
+        return dict(
+            reason=reason
+            )
+
 
 
 class TimeDeltaRecord(Record):
@@ -495,6 +563,7 @@ class SleepRecord(Record):
         3: 'merge',
         4: 'too short',
         5: 'too long',
+        6: 'manual',
     }
 
     def parse(self):
@@ -552,7 +621,7 @@ class BluetoothRecord(Record):
             hext = self.data[1:].hex()
         except AttributeError:
             hext = hexlify(self.data[1:])
-        self._text = 'h=%d %s' % (self.data[0], hext)
+        self._text = 'h=0x%02x %s' % (self.data[0], hext)
 
         # HACK: if we see a 1005 time-setting record, extract
         # the time zone offset, if it's present, so we can
@@ -562,7 +631,15 @@ class BluetoothRecord(Record):
             # '40200509030920f00000000000'
             #  1 2 3 4 5 6 7 8 9
             try:
-                Record._tz_offset = dt.timedelta(seconds=struct.unpack('b', self.data[8:9])[0] * 900)
+                tz_offset = dt.timedelta(seconds=struct.unpack('b', self.data[8:9])[0] * 900)
+                if not Record._tz_known:
+                    Record._ts_base += tz_offset
+                    Record._tz_offset = tz_offset
+                    Record._tz_known = True
+                else:
+                    Record._ts_base += (tz_offset - Record._tz_offset)
+                    Record._tz_offset = tz_offset
+
             except struct.error as ex:
                 pass    # probably no offset present so ignore
 
@@ -603,7 +680,8 @@ class AlarmLoadRecord(Record):
         dtime = dt.timedelta(seconds=delta)
         alarm_time = dt.datetime.fromtimestamp(round((self._ts + dtime).timestamp() / 60) * 60)
 
-        self._text = f'#{aid} delta={dtime} (at ~{alarm_time})'
+        tzk = '' if Record._tz_known else '*'
+        self._text = f'#{aid} delta={dtime} (at ~{alarm_time}{tzk})'
 
         return dict(
             aid=aid,
@@ -1106,6 +1184,72 @@ class OtaRecord(Record):
 
 
 
+class TemperatureRecord(Record):
+    rtype = 40 # LREC_TEMPERATURE
+
+    def parse(self):
+        # We briefly used 2 bytes for 0.25C resolution but after some
+        # initial data collection switched to 1 byte as there's no need
+        # for that much resolution with this data.
+        try:
+            temp, = struct.unpack_from('<h', self.data)
+            degrees = f'{temp / 4:g}\N{DEGREE SIGN}C'
+        except struct.error:
+            temp, = struct.unpack_from('b', self.data)
+            degrees = f'{temp}\N{DEGREE SIGN}C'
+
+        self._text = degrees
+
+        return extract('degrees', locals())
+
+
+
+class TraceRecord(Record):
+    rtype = 41 # LREC_TRACE
+
+    _DESC = {y: x.lower().replace('_', ' ')[len('trace_'):] for x, y in dict(
+        TRACE_NULL = 0,
+        TRACE_BONDED_PEER_CONNECTED = 1,
+        TRACE_SECURITY_SUCCEEDED = 2,
+        TRACE_SECURITY_FAILED = 3,
+        TRACE_PAIR_REQUEST_FROM_BONDED_PEER = 4,
+        TRACE_CONN_SEC_START = 5,
+        TRACE_PEER_DATA_UPDATE_SUCCEEDED = 6,
+        TRACE_PEER_DELETE_SUCCEEDED = 7,
+        TRACE_LOCAL_DB_CACHE_APPLIED = 8,
+        TRACE_SERVICE_CHANGED_IND_SENT = 9,
+        TRACE_SERVICE_CHANGED_IND_CONFIRMED = 10,
+        TRACE_PEERS_DELETE_SUCCEEDED = 11,
+        TRACE_LOCAL_DB_CACHE_APPLY_FAILED = 12,
+        TRACE_CONN_PARAMS_EVT_SUCCEEDED = 13,
+        TRACE_CONN_PARAMS_EVT_FAILED = 14,
+        TRACE_ANCS_DISCOVERY_COMPLETE = 15,
+        TRACE_ANCS_DISCOVERY_FAILED = 16,
+        TRACE_STORAGE_FULL = 17,
+        TRACE_ANCS_DISCOVERY_BUSY = 18,
+        TRACE_GC_QUEUE_FULL = 19,
+        TRACE_FDS_STATS = 20,
+        TRACE_ALREADY_ENCRYPTED = 21,
+        TRACE_REQUESTED_ENCRYPTION = 22,
+    ).items()}
+
+
+    def parse(self):
+        code, = struct.unpack_from('B', self.data)
+        if len(self.data) == 1:
+            data = None
+        else:
+            data = self.data[1:]
+
+        desc = self._DESC.get(code, "?")
+        self._text = f'code={code} ({desc})'
+        if data is not None:
+            self._text += f', data={data.hex()}'
+
+        return extract('code desc data', locals())
+
+
+
 class UnusedRecord(Record):
     '''Not a true record... just covers unused bytes at end of a sector.'''
 
@@ -1222,7 +1366,15 @@ class LogParser:
                 data = m.group(1).replace(r'\n', '\n')
                 data = base64.b64decode(data)
             except TypeError:   # probably binary data, so already decoded
-                pass
+                # dump from bluepy-helper?
+                tag = b'rsp=$ntfyhnd=h4Ad=b'
+                if tag in data:
+                    data = b'\n'.join((x[len(tag):] if x.startswith(tag) else x) for x in data.splitlines())
+
+                try:
+                    data = bytes.fromhex(data.decode())  # but try hex anyway
+                except (TypeError, UnicodeDecodeError):
+                    pass
 
         else:   # retrieve from web
             data = self.get_feedback()
@@ -1247,7 +1399,19 @@ class LogParser:
 
     def parse(self, data):
         Record._reset()
-        CatRecord._reset()
+
+        # strip off transfer header if it's found
+        try:
+            fields = struct.unpack_from('<BBLL', data, 0)
+            if (    fields[0] == 0b1000010
+                and fields[1] == 0
+                and fields[2] != 0
+                and (fields[3] < 4096*10)
+                ):
+                # print(f'skipping transfer header {data[:10].hex()}')
+                data = data[10:]
+        except Exception:
+            pass
 
         src = bytearray(data)
         num_bytes = len(src)
