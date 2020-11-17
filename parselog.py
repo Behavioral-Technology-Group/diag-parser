@@ -14,7 +14,7 @@ import sys
 import time
 
 
-version = '1.3.0'
+version = '1.3.1'
 
 log = logging.getLogger()
 
@@ -1239,12 +1239,12 @@ class TraceRecord(Record):
         if len(self.data) == 1:
             data = None
         else:
-            data = self.data[1:]
+            data = self.data[1:].hex()
 
         desc = self._DESC.get(code, "?")
         self._text = f'code={code} ({desc})'
         if data is not None:
-            self._text += f', data={data.hex()}'
+            self._text += f', data={data}'
 
         return extract('code desc data', locals())
 
