@@ -14,7 +14,7 @@ import sys
 import time
 
 
-version = '1.3.1'
+version = '1.3.2'
 
 log = logging.getLogger()
 
@@ -223,7 +223,19 @@ class TimestampRecord(Record):
     rtype = 1   # LREC_TIMESTAMP
 
     def parse(self):
-        value = struct.unpack_from('<L', self.data)[0]
+        try:
+            value, offset = struct.unpack_from('<Lb', self.data)
+            tz_offset = dt.timedelta(seconds=offset * 900)
+            if not Record._tz_known:
+                Record._ts_base += tz_offset
+                Record._tz_offset = tz_offset
+                Record._tz_known = True
+            else:
+                Record._ts_base += (tz_offset - Record._tz_offset)
+                Record._tz_offset = tz_offset
+        except struct.error:
+            value, = struct.unpack_from('<L', self.data)
+
         self._ts = dt.datetime.utcfromtimestamp(value) + Record._tz_offset
 
         Record._tocks = 0
@@ -1231,6 +1243,15 @@ class TraceRecord(Record):
         TRACE_FDS_STATS = 20,
         TRACE_ALREADY_ENCRYPTED = 21,
         TRACE_REQUESTED_ENCRYPTION = 22,
+        TRACE_LOG_DUMP_DONE = 23,
+        TRACE_LOG_DUMP_FAILED = 24,
+        TRACE_PEERS_DELETE = 25,
+        TRACE_PEERS_DELETE_SKIPPED = 26,
+        TRACE_ANCS_ERROR = 27,
+        TRACE_ANCS_INVALID_NOTIF = 28,
+        TRACE_DUPLICATE_SCRIPT = 29,
+        TRACE_SCRIPT = 30,
+        TRACE_ACTION_INVALID = 31,
     ).items()}
 
 
@@ -1240,6 +1261,27 @@ class TraceRecord(Record):
             data = None
         else:
             data = self.data[1:].hex()
+
+        desc = self._DESC.get(code, "?")
+        self._text = f'code={code} ({desc})'
+        if data is not None:
+            self._text += f', data={data}'
+
+        return extract('code desc data', locals())
+
+
+class StatsRecord(Record):
+    rtype = 43 # LREC_STATS
+
+    _DESC = {y: x.lower().replace('_', ' ')[len('trace_'):] for x, y in dict(
+        STATS_TYPE_ANCS = 0,
+        STATS_TYPE_FDS = 1,
+    ).items()}
+
+
+    def parse(self):
+        code = self.data[0]
+        data = self.data[1:].hex()
 
         desc = self._DESC.get(code, "?")
         self._text = f'code={code} ({desc})'
