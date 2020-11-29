@@ -1252,6 +1252,7 @@ class TraceRecord(Record):
         TRACE_DUPLICATE_SCRIPT = 29,
         TRACE_SCRIPT = 30,
         TRACE_ACTION_INVALID = 31,
+        TRACE_CONNECT_FROM_RPI = 32,
     ).items()}
 
 
