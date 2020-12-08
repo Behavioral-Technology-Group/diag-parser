@@ -14,7 +14,7 @@ import sys
 import time
 
 
-version = '1.3.2'
+version = '1.4.0'
 
 log = logging.getLogger()
 
@@ -88,6 +88,7 @@ class Record:
         cls._prev_rec = cls._rec = None
         cls._tz_offset = dt.timedelta()
         cls._tz_known = False
+        cls._pos = 0
 
 
     @classmethod
@@ -138,6 +139,7 @@ class Record:
 
 
     def _parse(self, code, src):
+        self._pos = Record._pos
         try:
             byte = src.pop(0)
         except IndexError:
@@ -160,6 +162,7 @@ class Record:
 
         del src[:self.length]
         self.raw.extend(self.data)
+        Record._pos += len(self.raw)
 
         self.fields = dict(
             type=self.rtype,
@@ -209,7 +212,7 @@ class Record:
     def __str__(self):
         r = [self.text_header(), self.text_body()]
         if self.debug:
-            r.append(' ' + hexlify(self.raw))
+            r.append(f' {self._pos:04x}@{hexlify(self.raw)}')
         return ' '.join(r)
 
 
@@ -690,7 +693,10 @@ class AlarmLoadRecord(Record):
 
         delta *= 10
         dtime = dt.timedelta(seconds=delta)
-        alarm_time = dt.datetime.fromtimestamp(round((self._ts + dtime).timestamp() / 60) * 60)
+        try:
+            alarm_time = dt.datetime.fromtimestamp(round((self._ts + dtime).timestamp() / 60) * 60)
+        except OSError:
+            alarm_time = '(invalid date)'
 
         tzk = '' if Record._tz_known else '*'
         self._text = f'#{aid} delta={dtime} (at ~{alarm_time}{tzk})'
@@ -976,6 +982,7 @@ class FflagsRecord(Record):
     rtype = 31  # LREC_FFLAGS
 
     def parse(self):
+        # flags = amazon = variant = 0
         if len(self.data) == 4:
             flags, = struct.unpack_from('<L', self.data)
             amazon = bool(flags & 0x01)
@@ -1122,6 +1129,12 @@ class AncsRecord(Record):
                 # self._text = f'{ttext}: hnd=0x{hnd:x} {etext}'
                 self._text = f'{ttext}: {etext}'
 
+            elif typ == 1:
+                ttext = 'appid'
+                etext = self.data[1:].decode('utf-8', errors='ignore')
+                # self._text = f'{ttext}: hnd=0x{hnd:x} {etext}'
+                self._text = f'{ttext}: {etext}'
+
             else:
                 ttext = f'{typ}'
                 dat = dict(type=ttext, text=repr(bytes(self.data[1:])))
@@ -1253,6 +1266,13 @@ class TraceRecord(Record):
         TRACE_SCRIPT = 30,
         TRACE_ACTION_INVALID = 31,
         TRACE_CONNECT_FROM_RPI = 32,
+        TRACE_REQUEST_ENCRYPTION_AGAIN = 33,
+        TRACE_RSSI = 34,
+        TRACE_ANCS_BLAST_BEGIN = 35,
+        TRACE_ANCS_POST_BLAST = 36,
+        TRACE_ANCS_HEALTH_OR_OTHER = 37,
+        TRACE_TEST_FLAGS = 38,
+        TRACE_CFG_FLAGS = 39,
     ).items()}
 
 
@@ -1262,6 +1282,8 @@ class TraceRecord(Record):
             data = None
         else:
             data = self.data[1:].hex()
+            if code == 34:
+                data = f'{ord(self.data[1:]) - 256}dB'
 
         desc = self._DESC.get(code, "?")
         self._text = f'code={code} ({desc})'
@@ -1274,9 +1296,10 @@ class TraceRecord(Record):
 class StatsRecord(Record):
     rtype = 43 # LREC_STATS
 
-    _DESC = {y: x.lower().replace('_', ' ')[len('trace_'):] for x, y in dict(
+    _DESC = {y: x.lower().replace('_', ' ')[len('stats_type_'):] for x, y in dict(
         STATS_TYPE_ANCS = 0,
         STATS_TYPE_FDS = 1,
+        STATS_TYPE_SCAN = 2,
     ).items()}
 
 
@@ -1293,8 +1316,39 @@ class StatsRecord(Record):
 
 
 
+class BeaconRecord(Record):
+    rtype = 42 # LREC_BEACON
+
+    def parse(self):
+        rssi = self.data[0] - 256
+        data = self.data[1:]
+        if (len(data) >= 4
+            and (len(data[1:]) == data[0])
+            and data[1:4] == b'\xff\x98\xff'
+            ):
+            data = data[4:]
+            # This could be misleading because although we can
+            # strip the prefix if it's correct, we don't show anything
+            # to prove we've done so, so a bogus version of it may
+            # show up and look like data that maybe had a correct prefix
+            # in front, which we stripped (but we didn't).
+            flag = ''
+        else:
+            flag = '?'
+
+        if data:
+            self._text = f'rssi={rssi} data={flag}{data.hex()}{flag}'
+        else:
+            self._text = f'rssi={rssi}'
+
+        return extract('rssi data', locals())
+
+
+
 class UnusedRecord(Record):
-    '''Not a true record... just covers unused bytes at end of a sector.'''
+    '''Unused bytes at end of a sector OR an incompletely written record,
+    where the length and data was written but the device crashed before
+    it could go back to write the type byte.'''
 
     ERASED_BYTE = rtype = 0xFF
 
@@ -1309,6 +1363,9 @@ class UnusedRecord(Record):
 
 
     def _parse(self, code, src):
+        # if self._pos == 19898:
+        #     breakpoint()
+        self._pos = Record._pos
         while True:
             byte = src.pop(0)
             if byte != self.ERASED_BYTE:
@@ -1317,9 +1374,19 @@ class UnusedRecord(Record):
 
             self.raw.append(byte)
 
+        # detect if we're not in the right position to be the unused
+        # bytes at the end of a sector, in which case we must be
+        # an incomplete record
+        if (self._pos + len(self.raw)) % (4096-16) != 0:
+            self.name = 'LostRecord'
+            src[:0] = self.raw[1:]
+            del self.raw[1:]
+            return super()._parse(code, src)
+
         self.timestamped = False
         self.data = bytearray()
         self.length = len(self.raw)
+        Record._pos += len(self.raw)
 
         self.fields = dict(
             raw=self.raw.hex(),
@@ -1335,6 +1402,11 @@ class UnusedRecord(Record):
         n = len(self.raw)
         s = '' if n==1 else 's'
         self._text = f'({n} erased byte{s} at end of sector)'
+
+
+    def parse(self):
+        # log.debug(f'in UnusedRecord.parse(): {self._pos}')
+        return super().parse()
 
 
 
@@ -1399,32 +1471,34 @@ class LogParser:
 
     def retrieve(self):
         '''Retrieve feedback data from web or filesystem.'''
-        path = Path(args.fid)
-        if path.exists():
-            data = path.read_bytes()
+        if not args.fid:
+            data = sys.stdin.buffer.read()
+        else:
+            path = Path(args.fid)
+            if path.exists():
+                data = path.read_bytes()
+            else:   # retrieve from web
+                data = self.get_feedback()
 
-            # try treating as extracted encoded data
+                # optionally cache it locally
+                if args.cache:
+                    Path(args.fid).write_bytes(data)
+
+        # try treating as extracted encoded data
+        try:
+            m = re.search(r'diagnostic_data"=>"(.*)"', data)
+            data = m.group(1).replace(r'\n', '\n')
+            data = base64.b64decode(data)
+        except TypeError:   # probably binary data, so already decoded
+            # dump from bluepy-helper?
+            tag = b'rsp=$ntfyhnd=h4Ad=b'
+            if tag in data:
+                data = b'\n'.join(x[len(tag):] for x in data.splitlines() if x.startswith(tag))
+
             try:
-                m = re.search(r'diagnostic_data"=>"(.*)"', data)
-                data = m.group(1).replace(r'\n', '\n')
-                data = base64.b64decode(data)
-            except TypeError:   # probably binary data, so already decoded
-                # dump from bluepy-helper?
-                tag = b'rsp=$ntfyhnd=h4Ad=b'
-                if tag in data:
-                    data = b'\n'.join((x[len(tag):] if x.startswith(tag) else x) for x in data.splitlines())
-
-                try:
-                    data = bytes.fromhex(data.decode())  # but try hex anyway
-                except (TypeError, UnicodeDecodeError):
-                    pass
-
-        else:   # retrieve from web
-            data = self.get_feedback()
-
-            # optionally cache it locally
-            if args.cache:
-                Path(args.fid).write_bytes(data)
+                data = bytes.fromhex(data.decode())  # but try hex anyway
+            except (TypeError, UnicodeDecodeError):
+                pass
 
         return data
 
@@ -1549,7 +1623,7 @@ if __name__ == '__main__':
         help='output non-compact JSON with indentation etc.')
     parser.add_argument('--filter', default='*')
     parser.add_argument('--raw', action='store_true')
-    parser.add_argument('fid')
+    parser.add_argument('fid', nargs='?')
 
     args = parser.parse_args()
 
