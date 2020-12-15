@@ -14,7 +14,7 @@ import sys
 import time
 
 
-version = '1.4.1'
+version = '1.4.2'
 
 log = logging.getLogger()
 
@@ -1336,8 +1336,10 @@ class BeaconRecord(Record):
         else:
             flag = '?'
 
+        data = data.hex()
+
         if data:
-            self._text = f'rssi={rssi} data={flag}{data.hex()}{flag}'
+            self._text = f'rssi={rssi} data={flag}{data}{flag}'
         else:
             self._text = f'rssi={rssi}'
 
@@ -1579,7 +1581,7 @@ class LogParser:
                 json.dumps(j)   # just to test so errors are reported sooner
             except Exception as ex:
                 log.error('unable to encode as JSON: %r in %s', j, rec)
-                j = {'error': str(ex), 'name': rec.name, 'v': rec.raw.hex(), 'ts': ''}
+                j = {'v': {'error': f'{ex}: encoding {rec!r}'}, 'name': rec.name, 'ts': rec.get('ts', '')}
             entries.append(j)
             raw_len += len(rec.raw)
 
