@@ -14,7 +14,7 @@ import sys
 import time
 
 
-version = '1.4.0'
+version = '1.4.1'
 
 log = logging.getLogger()
 
@@ -1575,7 +1575,11 @@ class LogParser:
         for i, rec in enumerate(records):
             j = rec.fields
             log.debug('rec: %s', j)
-            json.dumps(j)   # just to test so errors are reported sooner
+            try:
+                json.dumps(j)   # just to test so errors are reported sooner
+            except Exception as ex:
+                log.error('unable to encode as JSON: %r in %s', j, rec)
+                j = {'error': str(ex), 'name': rec.name, 'v': rec.raw.hex(), 'ts': ''}
             entries.append(j)
             raw_len += len(rec.raw)
 
@@ -1619,7 +1623,7 @@ if __name__ == '__main__':
     parser.add_argument('--token', default='1o2p3alkmfosdngoi23j4r2oij3komdfj9031j102j30j')
     parser.add_argument('--json', action='store_true')
     parser.add_argument('--cache', action='store_true')
-    parser.add_argument('--pretty', action='store_true',
+    parser.add_argument('--pretty', action='store_true', default=True,
         help='output non-compact JSON with indentation etc.')
     parser.add_argument('--filter', default='*')
     parser.add_argument('--raw', action='store_true')
