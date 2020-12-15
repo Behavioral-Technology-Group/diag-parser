@@ -1581,7 +1581,7 @@ class LogParser:
                 json.dumps(j)   # just to test so errors are reported sooner
             except Exception as ex:
                 log.error('unable to encode as JSON: %r in %s', j, rec)
-                j = {'v': {'error': f'{ex}: encoding {rec!r}'}, 'name': rec.name, 'ts': rec.get('ts', '')}
+                j = {'v': {'error': f'{ex} while encoding {j!r}'}, 'name': rec.name, 'ts': j.get('ts', '')}
             entries.append(j)
             raw_len += len(rec.raw)
 
