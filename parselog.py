@@ -14,7 +14,7 @@ import sys
 import time
 
 
-version = '1.4.2'
+version = '1.4.5'
 
 log = logging.getLogger()
 
@@ -432,10 +432,16 @@ class ConnectRecord(Record):
     rtype = 5   # LREC_CONNECT
 
     def parse(self):
-        mac, ci = struct.unpack_from('<6sH', self.data)
-        mac = ':'.join('%02X' % x for x in bytearray(mac))
+        try:
+            mac, ci = struct.unpack_from('<6sH', self.data)
+        except struct.error:
+            mac, = struct.unpack_from('<6s', self.data)
+            ci = None
 
-        self._text = f'mac={mac} ci={ci}ms'
+        mac = ':'.join('%02X' % x for x in bytearray(mac))
+        self._text = f'mac={mac}'
+        if ci:
+            self._text += f' ci={ci}ms'
 
         return dict(
             mac=mac,
@@ -1273,6 +1279,11 @@ class TraceRecord(Record):
         TRACE_ANCS_HEALTH_OR_OTHER = 37,
         TRACE_TEST_FLAGS = 38,
         TRACE_CFG_FLAGS = 39,
+        TRACE_INACTIVE_ALARM_FIRED = 40,
+        TRACE_CONN_PARAM_INITIAL = 41,
+        TRACE_CONN_PARAM_UPDATE = 42,
+        TRACE_CONN_PARAM_ERROR = 43,
+        TRACE_VUSB_BOUNCE = 44,
     ).items()}
 
 
@@ -1293,6 +1304,7 @@ class TraceRecord(Record):
         return extract('code desc data', locals())
 
 
+
 class StatsRecord(Record):
     rtype = 43 # LREC_STATS
 
@@ -1300,6 +1312,7 @@ class StatsRecord(Record):
         STATS_TYPE_ANCS = 0,
         STATS_TYPE_FDS = 1,
         STATS_TYPE_SCAN = 2,
+        STATS_TYPE_LOAD = 3,
     ).items()}
 
 
@@ -1344,6 +1357,17 @@ class BeaconRecord(Record):
             self._text = f'rssi={rssi}'
 
         return extract('rssi data', locals())
+
+
+
+class CriticalRecord(Record):
+    '''Indicates a battery-critical shutdown.'''
+    rtype = 44 # LREC_CRITICAL
+
+    def parse(self):
+        self._text = f'battery low shutdown'
+
+        return {}
 
 
 
@@ -1582,6 +1606,7 @@ class LogParser:
             except Exception as ex:
                 log.error('unable to encode as JSON: %r in %s', j, rec)
                 j = {'v': {'error': f'{ex} while encoding {j!r}'}, 'name': rec.name, 'ts': j.get('ts', '')}
+
             entries.append(j)
             raw_len += len(rec.raw)
 
