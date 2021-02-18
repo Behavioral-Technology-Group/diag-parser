@@ -14,7 +14,7 @@ import sys
 import time
 
 
-version = '1.4.5'
+version = '1.4.7'
 
 log = logging.getLogger()
 
@@ -693,9 +693,11 @@ class AlarmLoadRecord(Record):
     def parse(self):
         if len(self.data) >= 4:
             delta, aid = struct.unpack_from('<HH', self.data)
-        else:
+        elif len(self.data) >= 2:
             delta, = struct.unpack_from('<H', self.data)
             aid = 0
+        else:
+            return dict(aid='none', delta=0, alarm_time='none')
 
         delta *= 10
         dtime = dt.timedelta(seconds=delta)
@@ -1284,6 +1286,14 @@ class TraceRecord(Record):
         TRACE_CONN_PARAM_UPDATE = 42,
         TRACE_CONN_PARAM_ERROR = 43,
         TRACE_VUSB_BOUNCE = 44,
+        TRACE_RADIO_SILENCE = 45,
+        TRACE_HD_SNOOZED = 46,
+        TRACE_JJ_SILENCED = 47,
+        TRACE_ALARM_NOTIFY_OFF = 48,
+        TRACE_ALARM_DATA = 49,
+        TRACE_ALARM_SAVE = 50,
+        TRACE_ALARM_RESCHEDULE = 51,
+        TRACE_ALARM_RTC_BAD = 52,
     ).items()}
 
 
@@ -1368,6 +1378,34 @@ class CriticalRecord(Record):
         self._text = f'battery low shutdown'
 
         return {}
+
+
+class AlarmMiscRecord(Record):
+    rtype = 45 # LREC_ALARM_MISC
+
+    _DESC = {y: x.lower().replace('_', ' ')[len('app_'):] for x, y in dict(
+        APP_CONTROL_START   = 0,
+        APP_CONTROL_DELETE  = 1,
+        APP_CONTROL_STOP    = 2,
+        APP_CONTROL_SNOOZE  = 3,
+        APP_CONTROL_ALARM   = 4,
+        APP_CONTROL_LIST    = 5,
+        APP_CONTROL_DUMP    = 6,
+        APP_MISC_COUNTS     = 128,
+    ).items()}
+
+
+    def parse(self):
+        code = self.data[0]
+        data = self.data[1:].hex()
+
+        desc = self._DESC.get(code, "?")
+        self._text = f'code={code} ({desc})'
+        if data is not None:
+            self._text += f', data={data}'
+
+        return extract('code desc data', locals())
+
 
 
 
