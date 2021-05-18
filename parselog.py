@@ -14,7 +14,7 @@ import sys
 import time
 
 
-version = '1.4.7'
+version = '1.4.8'
 
 log = logging.getLogger()
 
@@ -72,6 +72,21 @@ def decode_duration(x):
     elif scale == 0b11:
         return 3000 + mult * 500
 
+
+BATTERY_ZERO_MVOLTS = 3250  # was 3200 until 6.1.13
+
+def v2p(volt):
+    if volt < BATTERY_ZERO_MVOLTS:
+        p = 0
+    elif volt < 3616:
+        p = (volt - BATTERY_ZERO_MVOLTS) / (3616-BATTERY_ZERO_MVOLTS) * 7 + 0
+    elif volt < 3759:
+        p = (volt - 3616) / (3759-3616) * (50-7) + 7
+    elif volt < 4100:
+        p = (volt - 3759) / (4100-3759) * (100-50) + 50
+    else:
+        p = 100
+    return round(p, 1)
 
 
 class Record:
@@ -314,16 +329,16 @@ class ButtonRecord(Record):
     }
 
     POSITION = {
-        4: 'left',
-        5: 'middle',
-        6: 'right',
+        4: '1',
+        5: '2',
+        6: '3',
     }
 
     SPEED = {
         0: 'other',
-        1: 'quick',
-        2: 'short',
-        3: 'long',
+        1: 'Q',
+        2: 'S',
+        3: 'L',
     }
 
 
@@ -334,7 +349,7 @@ class ButtonRecord(Record):
         if b0 & 0b01110000:
             positions = '+'.join(self.POSITION[i] for i in range(4, 7) if b0 & (1<<i))
             speed = self.SPEED.get(b0 & 0x3, '?')
-            action = f'{speed} {positions}'
+            action = f'{speed}{positions}'
         else:
             try:
                 action = self.ACTIONS[b0]
@@ -363,36 +378,56 @@ class ZapRecord(Record):
     def parse(self):
         if len(self.data) > 1:
             names = []
-            if len(self.data) >= 9:
-                b0, b1, b2, b3, b4, b5, b6, b7, b8 = struct.unpack_from('BBBBBBBBB', self.data)
-                t10 = b6 * 4
-                minv = b7 * 2
-                maxv = b8 * 2
-                extra = f' t10={t10:3}ms min={minv:3}V max={maxv:3}V'
-                extras = dict(t10=t10, minv=minv, maxv=maxv)
-            else:
-                b0, b1, b2, b3, b4, b5 = struct.unpack_from('BBBBBB', self.data)
-                extra = ''
-                extras = {}
+            try:
+                if len(self.data) >= 9:
+                    b0, b1, b2, b3, b4, b5, b6, b7, b8 = struct.unpack_from('BBBBBBBBB', self.data)
+                    t10 = b6 * 4
+                    rec_ver = (b0 >> 6) & 0b11
 
-            target = (b0 & 0xf) * 10
-            charged = bool(b0 & 0x10)
-            skipped = bool(b0 & 0x20)
-            battv = round((b1 * 4 + 3180) / 1000.0, 3)
-            release = b2 * 2
-            exit = b3 * 2
-            tchg = b4 * 4
-            trel = b5 * 4
-            if charged:
-                chgtext = f'{tchg:3}ms'
-            else:
-                chgtext = '(NOT)'
-                tchg = 0
-            self._text = (
-                f'{target:3}% chg={chgtext} r={release:3}V'
-                f' rel={trel:3}ms{extra} x={exit:3}V{"SKIP" if skipped else ""}'
-                f' @{battv:.3}V'
-                )
+                else:
+                    b0, b1, b2, b3, b4, b5 = struct.unpack_from('BBBBBB', self.data)
+                    extra = ''
+                    extras = {}
+                    rec_ver = -1
+
+                if rec_ver <= 0:
+                    target = (b0 & 0xf) * 10
+                    battv = round((b1 * 4 + 3180) / 1000.0, 3)
+                    release = b2 * 2
+                    exit = b3 * 2
+                    minv = b7 * 2
+                    maxv = b8 * 2
+                else:
+                    target = int(round((b1 * 3) * 100 / 470))
+                    battv = 0
+                    release = b2 * 3
+                    exit = b3 * 3
+                    minv = b7 * 3
+                    maxv = b8 * 3
+
+                if rec_ver >= 0:
+                    extra = f' t10={t10:3}ms min={minv:3}V max={maxv:3}V'
+                    extras = dict(t10=t10, minv=minv, maxv=maxv)
+
+                charged = bool(b0 & 0x10)
+                skipped = bool(b0 & 0x20)
+
+                tchg = b4 * 4
+                trel = b5 * 4
+
+                if charged:
+                    chgtext = f'{tchg:3}ms'
+                else:
+                    chgtext = '(NOT)'
+                    tchg = 0
+                self._text = (
+                    f'{target:3}% chg={chgtext} r={release:3}V'
+                    f' rel={trel:3}ms{extra} x={exit:3}V{"SKIP" if skipped else ""}'
+                    f' @{battv:.3f}V'
+                    )
+            except Exception as ex:
+                breakpoint()
+                pass
 
             results = extract('target charged skipped battv release exit tchg trel', locals())
             results.update(extras)
@@ -408,7 +443,10 @@ class ZapRecord(Record):
                 4: 'HV_CHECK',
                 5: 'LOW_BATT',
                 6: 'BUTTON',
-            }.get(code, '(unknown code)')
+                7: 'LOCKED',
+                8: 'INTERRUPTED',
+                9: 'DO_NOT_DISTURB',
+            }.get(code, f'unknown code {code}')
             self._text = 'skipped (%s)' % (reason)
 
             return dict(
@@ -537,10 +575,11 @@ class BatteryRecord(Record):
         else:
             charged = False
         voltage = round((voltage & 0x3fff) / 1000.0, 3)
+        p = v2p(voltage*1000)
 
         ct = ' CHG' if charged else ''
         vt = ' VUSB' if vusb else ''
-        self._text = f'{voltage:.3f}V{ct}{vt}'
+        self._text = f'{voltage:.3f}V {p:5.1f}%{ct}{vt}'
 
         return dict(
             voltage=voltage,
@@ -753,6 +792,26 @@ class AlarmSnoozeRecord(Record):
 class AlarmEndRecord(Record):
     rtype = 18  # LREC_ALARM_END
 
+    REASON = {
+        0: 'none',  # legacy: no code was recorded
+        1: 'APP',
+        2: 'USER',
+        3: 'DURATION',
+        4: 'DND',
+    }
+
+    def parse(self):
+        if len(self.data) >= 1:
+            code, = struct.unpack_from('<B', self.data)
+        else:
+            code = 0
+
+        reason = self.REASON.get(code, f'{code}?').lower()
+
+        self._text = f'reason={reason}'
+
+        return dict(reason=reason)
+
 
 class HdActiveRecord(Record):
     rtype = 19  # LREC_HD_ACTIVE
@@ -870,7 +929,8 @@ class VibeRecord(Record):
                 1: 'ZERO_PARAM',
                 5: 'LOW_BATT',
                 6: 'BUTTON',
-            }.get(code, '(unknown code)')
+                9: 'DO_NOT_DISTURB',
+            }.get(code, f'unknown code {code}')
 
             self._text = f'skipped ({reason})'
 
@@ -1264,8 +1324,8 @@ class TraceRecord(Record):
         TRACE_FDS_STATS = 20,
         TRACE_ALREADY_ENCRYPTED = 21,
         TRACE_REQUESTED_ENCRYPTION = 22,
-        TRACE_LOG_DUMP_DONE = 23,
-        TRACE_LOG_DUMP_FAILED = 24,
+        TRACE_FILE_DUMP_DONE = 23,
+        TRACE_FILE_DUMP_FAILED = 24,
         TRACE_PEERS_DELETE = 25,
         TRACE_PEERS_DELETE_SKIPPED = 26,
         TRACE_ANCS_ERROR = 27,
@@ -1294,6 +1354,10 @@ class TraceRecord(Record):
         TRACE_ALARM_SAVE = 50,
         TRACE_ALARM_RESCHEDULE = 51,
         TRACE_ALARM_RTC_BAD = 52,
+        TRACE_ALARM_FORCE_TRIGGER = 53,
+        TRACE_LEGACY_CONFIG = 54,
+        TRACE_POF_WARN = 55,
+        TRACE_ZAP_ULOG_SKIPPED = 56,
     ).items()}
 
 
@@ -1308,8 +1372,8 @@ class TraceRecord(Record):
 
         desc = self._DESC.get(code, "?")
         self._text = f'code={code} ({desc})'
-        if data is not None:
-            self._text += f', data={data}'
+        # if data is not None:
+        #     add_repr += f', data={data}'
 
         return extract('code desc data', locals())
 
@@ -1406,6 +1470,103 @@ class AlarmMiscRecord(Record):
 
         return extract('code desc data', locals())
 
+
+
+class ErrorRecord(Record):
+    rtype = 46  # LREC_ERROR
+
+
+
+class ConfigPinRecord(Record):
+    rtype = 47  # LREC_CONFIG_PIN
+
+    def parse(self):
+        value, = struct.unpack_from('B', self.data)
+        state = {0: 'legacy', 1: 'HV-high', 2: 'future'}.get(value & 0x3)
+        self._text = state
+
+        return extract('state', locals())
+
+
+
+class DndRecord(Record):
+    rtype = 48  # LREC_DND
+
+    def parse(self):
+        flags, = struct.unpack_from('B', self.data)
+        tags = []
+        if flags & 0b01:
+            tags.append('manual')
+
+        if flags & 0b10:
+            tags.append('timed')
+
+        if tags:
+            self._text = text = ','.join(tags)
+        else:
+            self._text = text = 'off'
+
+        return extract('text', locals())
+
+
+
+class TriggerRecord(Record):
+    rtype = 49  # LREC_TRIGGER
+
+    _CIDS = {y: x.partition('_')[-1].lower().replace('_', ' ') for x, y in dict(
+        CONFIG_INVALID      = 0,
+        TRIGGER_BUTTON_Q1   = 1,
+        TRIGGER_BUTTON_Q2   = 2,
+        TRIGGER_BUTTON_Q3   = 3,
+        TRIGGER_BUTTON_L1   = 4,
+        TRIGGER_BUTTON_L2   = 5,
+        TRIGGER_BUTTON_L3   = 6,
+        CONFIG_SNOOZE       = 7,
+        CONFIG_LOW_BATT     = 8,
+        CONFIG_HOUR         = 9,
+        CONFIG_CHARGED      = 10,
+        CONFIG_USER_TIMES   = 11,
+        CONFIG_DOUBLETAP    = 12,
+        CONFIG_DST          = 13,
+        CONFIG_FLAGS        = 14,
+        CONFIG_MORSE        = 15,
+    ).items()}
+
+    _ACTS = {y: x[len('ACTION_'):].lower().replace('_', ' ') for x, y in dict(
+        ACTION_DEFAULT      = 0,
+        # ACTION_VIBE         = 1,
+        ACTION_BEEP         = 2,
+        ACTION_ZAP          = 3,
+        ACTION_AUDIO        = 4,
+        ACTION_SCRIPT       = 5,
+        ACTION_FLASHLIGHT   = 6,
+        ACTION_NEXT_SCRIPT  = 7,
+        ACTION_TOGGLE_RADIO = 8,
+        ACTION_LED          = 9,
+        ACTION_SHOW_BATTERY = 10,
+        ACTION_STOPWATCH    = 11,
+        ACTION_COUNTDOWN    = 12,
+        ACTION_DND          = 13,
+        ACTION_SHOW_TIME    = 14,
+        ACTION_SHOW_CONN    = 15,
+        ACTION_NONE         = 0xff,
+    ).items()}
+
+    def parse(self):
+        cid, act = struct.unpack_from('BB', self.data)
+        trigger = self._CIDS.get(cid, f'trig 0x{cid:02x}')
+        action = self._ACTS.get(act, f'action 0x{act:02x}')
+        self._text = f'{trigger} -> {action}'
+
+        return extract('trigger action', locals())
+
+
+
+class AppRecord(Record):
+    rtype = 50  # LREC_APP
+
+    # def add_repr(self, r):
+    #     r.append(' %s' % self.data.hex())
 
 
 
