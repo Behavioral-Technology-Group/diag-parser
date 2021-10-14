@@ -14,7 +14,7 @@ import sys
 import time
 
 
-version = '1.4.8'
+version = '1.5.0'
 
 log = logging.getLogger()
 
@@ -379,15 +379,38 @@ class ZapRecord(Record):
         if len(self.data) > 1:
             names = []
             try:
+                compact = False
+                extra = ''
+                extras = {}
+
                 if len(self.data) >= 9:
                     b0, b1, b2, b3, b4, b5, b6, b7, b8 = struct.unpack_from('BBBBBBBBB', self.data)
                     t10 = b6 * 4
                     rec_ver = (b0 >> 6) & 0b11
 
+                elif len(self.data) == 4:
+                    # ubyte       reserved : 3;
+                    # bool        discharged : 1;
+                    # bool        charged : 1;
+                    # bool        skipped : 1;
+                    # ubyte       rec_ver : 2;
+
+                    # ubyte       target;
+                    # ubyte       release_level;
+                    # ubyte       exit_or_release;    // exit level or release duration
+                    b0, b1, b2, b3 = struct.unpack_from('BBBB', self.data)
+                    rec_ver = (b0 >> 6) & 0b11
+                    t10 = b4 = b7 = b8 = 0  # tchg, minv, maxv
+                    if b0 & 0x08:   # if discharged, exit level unknown
+                        b5 = b3     # trel
+                        b3 = 0      # exit
+                    else:
+                        # b3 stays as exit
+                        b5 = 0      # trel
+                    compact = True
+
                 else:
                     b0, b1, b2, b3, b4, b5 = struct.unpack_from('BBBBBB', self.data)
-                    extra = ''
-                    extras = {}
                     rec_ver = -1
 
                 if rec_ver <= 0:
@@ -395,8 +418,11 @@ class ZapRecord(Record):
                     battv = round((b1 * 4 + 3180) / 1000.0, 3)
                     release = b2 * 2
                     exit = b3 * 2
-                    minv = b7 * 2
-                    maxv = b8 * 2
+                    try:
+                        minv = b7 * 2
+                        maxv = b8 * 2
+                    except UnboundLocalError:
+                        minv = maxv = 0
                 else:
                     target = int(round((b1 * 3) * 100 / 470))
                     battv = 0
@@ -405,9 +431,9 @@ class ZapRecord(Record):
                     minv = b7 * 3
                     maxv = b8 * 3
 
-                if rec_ver >= 0:
-                    extra = f' t10={t10:3}ms min={minv:3}V max={maxv:3}V'
-                    extras = dict(t10=t10, minv=minv, maxv=maxv)
+                # if rec_ver >= 0 and not compact:
+                #     extra = f' t10={t10:3}ms min={minv:3}V max={maxv:3}V'
+                #     extras = dict(t10=t10, minv=minv, maxv=maxv)
 
                 charged = bool(b0 & 0x10)
                 skipped = bool(b0 & 0x20)
@@ -420,11 +446,23 @@ class ZapRecord(Record):
                 else:
                     chgtext = '(NOT)'
                     tchg = 0
-                self._text = (
-                    f'{target:3}% chg={chgtext} r={release:3}V'
-                    f' rel={trel:3}ms{extra} x={exit:3}V{"SKIP" if skipped else ""}'
-                    f' @{battv:.3f}V'
-                    )
+
+                if compact:
+                    self._text = (
+                        f'{target:3}% r={release:3}V'
+                        f' x={exit:3}V{"SKIP" if skipped else ""} rel={trel:3}ms{extra}'
+                        )
+                elif rec_ver > 0:
+                    self._text = (
+                        f'{target:3}% chg={chgtext} r={release:3}V'
+                        f' x={exit:3}V{"SKIP" if skipped else ""} rel={trel:3}ms{extra}'
+                        )
+                else:
+                    self._text = (
+                        f'{target:3}% chg={chgtext} r={release:3}V'
+                        f' x={exit:3}V{"SKIP" if skipped else ""} rel={trel:3}ms{extra}'
+                        f' @{battv:.3f}V'
+                        )
             except Exception as ex:
                 breakpoint()
                 pass
@@ -1358,6 +1396,7 @@ class TraceRecord(Record):
         TRACE_LEGACY_CONFIG = 54,
         TRACE_POF_WARN = 55,
         TRACE_ZAP_ULOG_SKIPPED = 56,
+        TRACE_GCC_VERSION = 57,
     ).items()}
 
 
@@ -1372,8 +1411,8 @@ class TraceRecord(Record):
 
         desc = self._DESC.get(code, "?")
         self._text = f'code={code} ({desc})'
-        # if data is not None:
-        #     add_repr += f', data={data}'
+        if data is not None:
+            self._text += f', data={data}'
 
         return extract('code desc data', locals())
 
@@ -1513,6 +1552,7 @@ class DndRecord(Record):
 class TriggerRecord(Record):
     rtype = 49  # LREC_TRIGGER
 
+    # Note: only actual triggers are listed.
     _CIDS = {y: x.partition('_')[-1].lower().replace('_', ' ') for x, y in dict(
         CONFIG_INVALID      = 0,
         TRIGGER_BUTTON_Q1   = 1,
@@ -1525,11 +1565,7 @@ class TriggerRecord(Record):
         CONFIG_LOW_BATT     = 8,
         CONFIG_HOUR         = 9,
         CONFIG_CHARGED      = 10,
-        CONFIG_USER_TIMES   = 11,
         CONFIG_DOUBLETAP    = 12,
-        CONFIG_DST          = 13,
-        CONFIG_FLAGS        = 14,
-        CONFIG_MORSE        = 15,
     ).items()}
 
     _ACTS = {y: x[len('ACTION_'):].lower().replace('_', ' ') for x, y in dict(
@@ -1549,6 +1585,9 @@ class TriggerRecord(Record):
         ACTION_DND          = 13,
         ACTION_SHOW_TIME    = 14,
         ACTION_SHOW_CONN    = 15,
+        ACTION_TOGGLE_FIND  = 16,
+        ACTION_TIMER        = 17,
+        ACTION_MARK         = 18,
         ACTION_NONE         = 0xff,
     ).items()}
 
@@ -1632,6 +1671,68 @@ class UnusedRecord(Record):
     def parse(self):
         # log.debug(f'in UnusedRecord.parse(): {self._pos}')
         return super().parse()
+
+
+
+class FindingRecord(Record):
+    rtype = 51  # LREC_FINDING
+
+    _MSGS = {y: x[len('LOG_FINDING_'):].lower().replace('_', ' ') for x, y in dict(
+        LOG_FINDING_CANCEL = 0,
+        LOG_FINDING_TIMEOUT = 1,
+        LOG_FINDING_PHONE = 2,
+        LOG_FINDING_DEVICE = 3,
+    ).items()}
+
+
+    def parse(self):
+        code, = struct.unpack_from('B', self.data)
+
+        text = self._MSGS.get(code, f'code 0x{code:02x}')
+        self._text = f'{text} (code={code})'
+
+        return extract('text', locals())
+
+
+
+class TimerCfg(Record):
+    rtype = 52  # LREC_TIMER_CFG
+
+    def parse(self):
+        text = self._text = f'{self.data.hex()} (not parsed yet)'
+
+        return extract('text', locals())
+
+
+
+class Timer(Record):
+    rtype = 53  # LREC_TIMER
+
+    _MSGS = {y: x[len('TMR_'):].lower().replace('_', ' ') for x, y in dict(
+        TMR_NONE            = 0,
+        TMR_SW_START        = 1,
+        TMR_SW_STOP         = 2,
+        TMR_SW_PAUSE        = 3,
+        TMR_SW_RESUME       = 4,
+        TMR_CD_START        = 5,
+        TMR_CD_STOP         = 6,
+        TMR_CD_PAUSE        = 7,
+        TMR_CD_RESUME       = 8,
+        TMR_TOGGLE          = 16,
+        TMR_START           = 17,
+        TMR_STOP            = 18,
+        TMR_PAUSE           = 19,
+        TMR_RESUME          = 20,
+        TMR_SMART           = 21,
+    ).items()}
+
+    def parse(self):
+        code, tid = struct.unpack_from('BB', self.data)
+
+        text = self._MSGS.get(code, f'code 0x{code:02x}')
+        self._text = f'{text} T{tid}'
+
+        return extract('text tid', locals())
 
 
 
