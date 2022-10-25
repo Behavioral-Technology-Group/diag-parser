@@ -95,6 +95,8 @@ class Record:
     in the firmware source.  For example, LREC_ZAP is record type 4 so
     the ZapRecord class specifies rtype = 4.'''
 
+    LAST_CAL = []   # fill in by first ZapCal
+    _last_version = (1,)
 
     @classmethod
     def _reset(cls):
@@ -299,11 +301,15 @@ class RebootRecord(Record):
 
         if len(self.data) >= 4:
             version = '%d.%d.%d' % tuple(self.data[1:4])
+            vertuple = tuple(self.data[1:4])
         elif len(self.data) >= 3:
             version = '5.%d.%d' % tuple(self.data[1:3])
+            vertuple = (5,) + tuple(self.data[1:3])
         else:
             version = None
+            vertuple = (5,)
         ver = f' ver={version}' if version else ''
+        Record._last_version = vertuple
 
         self._text = f'{rtext}code={code}{ver}'
 
@@ -379,6 +385,7 @@ class ZapRecord(Record):
         if len(self.data) > 1:
             names = []
             try:
+                boost = False
                 compact = False
                 extra = ''
                 extras = {}
@@ -389,7 +396,8 @@ class ZapRecord(Record):
                     rec_ver = (b0 >> 6) & 0b11
 
                 elif len(self.data) == 4:
-                    # ubyte       reserved : 3;
+                    # ubyte       reserved : 2;
+                    # ubyte       boost : 1;
                     # bool        discharged : 1;
                     # bool        charged : 1;
                     # bool        skipped : 1;
@@ -407,6 +415,10 @@ class ZapRecord(Record):
                     else:
                         # b3 stays as exit
                         b5 = 0      # trel
+
+                    if b0 & 0x04:
+                        boost = True
+
                     compact = True
 
                 else:
@@ -424,7 +436,7 @@ class ZapRecord(Record):
                     except UnboundLocalError:
                         minv = maxv = 0
                 else:
-                    target = int(round((b1 * 3) * 100 / 470))
+                    target = int(round((b1 * 3) * 100 / (611 if boost else 470)))
                     battv = 0
                     release = b2 * 3
                     exit = b3 * 3
@@ -449,18 +461,20 @@ class ZapRecord(Record):
 
                 if compact:
                     self._text = (
-                        f'{target:3}% r={release:3}V'
-                        f' x={exit:3}V{"SKIP" if skipped else ""} rel={trel:3}ms{extra}'
+                        f'{target:3}%'
+                        f'{" (BOOST)" if boost else ""}'
+                        f' r={release:3}V'
+                        f' x={exit:3}V{" SKIP" if skipped else ""} rel={trel:3}ms{extra}'
                         )
                 elif rec_ver > 0:
                     self._text = (
                         f'{target:3}% chg={chgtext} r={release:3}V'
-                        f' x={exit:3}V{"SKIP" if skipped else ""} rel={trel:3}ms{extra}'
+                        f' x={exit:3}V{" SKIP" if skipped else ""} rel={trel:3}ms{extra}'
                         )
                 else:
                     self._text = (
                         f'{target:3}% chg={chgtext} r={release:3}V'
-                        f' x={exit:3}V{"SKIP" if skipped else ""} rel={trel:3}ms{extra}'
+                        f' x={exit:3}V{" SKIP" if skipped else ""} rel={trel:3}ms{extra}'
                         f' @{battv:.3f}V'
                         )
             except Exception as ex:
@@ -1066,12 +1080,12 @@ class EnergyRecord(Record):
 
     def parse(self):
         if len(self.data) == 6:
-            mean, level, maxlev = struct.unpack_from('<HHH', self.data)
-            self._text = 'mean=%s level=%s max=%s' % (mean, level, maxlev)
+            mean, sigma, maxlev = struct.unpack_from('<HHH', self.data)
+            self._text = 'mean=%s sigma=%s sp=%s max=%s' % (mean, sigma, maxlev >> 14, maxlev & 0x3fff)
 
             return dict(
                 mean=mean,
-                level=level,
+                sigma=sigma,
                 maxlev=maxlev,
                 )
         else:
@@ -1397,6 +1411,10 @@ class TraceRecord(Record):
         TRACE_POF_WARN = 55,
         TRACE_ZAP_ULOG_SKIPPED = 56,
         TRACE_GCC_VERSION = 57,
+        TRACE_DISCONNECT = 58,
+        TRACE_SMART = 59,
+        TRACE_CHARGED = 60,
+        TRACE_DRAIN = 61,
     ).items()}
 
 
@@ -1517,7 +1535,7 @@ class ErrorRecord(Record):
 
 
 class ConfigPinRecord(Record):
-    rtype = 47  # LREC_CONFIG_PIN
+    rtype = 47  # LREC_PIN_CONFIG
 
     def parse(self):
         value, = struct.unpack_from('B', self.data)
@@ -1733,6 +1751,212 @@ class Timer(Record):
         self._text = f'{text} T{tid}'
 
         return extract('text tid', locals())
+
+
+
+# Unknown(54) b'\x01\xae\x10\xc8\x00\xb5\x00\xa8\x00': 01ae10c800b500a800
+# bytebits    flags;
+# uword       drop_count;
+# uword       start_raw;  // should closely match zap.release_level but is raw value
+# uword       drop_raw;
+# uword       check_raw;
+class ProbeRecord(Record):
+    rtype = 54   # LREC_PROBE
+
+    def parse(self):
+        try:
+            flags, ndrop, start, drop, check = struct.unpack_from('<BHHHH', self.data)
+            extra = self.data[9:]
+        except struct.error:
+            try:
+                flags, ndrop, start, drop, check = struct.unpack_from('<BHBBB', self.data)
+            except struct.error:
+                flags, ndrop, start, drop, check = 0, 0, 0, 0, 0
+                extra = b''
+
+        version = (flags >> 2) & 0x3
+        if version >= 2:
+            ndrop *= 10
+
+        slope1 = (start-drop)/ndrop if ndrop else 0
+        slope2 = abs(drop-check)/ndrop if (flags & 0x01) else 0
+        rtext = (f' => {slope1/slope2:4.1f}x' if slope2 else ' => 99.9x') if (flags&1) else ''
+        if extra:
+            # breakpoint()
+            precs = struct.unpack_from('<' + 'H' * (len(extra)//2), extra)
+            etext = ' [%s]' % ' '.join(f'{((r>>11)+28)/30:.1f}@{(r&0x7ff)*100}' if ((r>>11)!=0b11111) else '-' for r in reversed(precs))
+        else:
+            etext = ' '
+
+        fset = set()
+        # if flags & 0x01:
+        #     fset.add('chk')
+        # if flags & 0x02:
+        #     fset.add('fin')
+        if flags & 0x40:
+            fset.add('-')
+            dtext = ''
+        else:
+            dtext = f' @{ndrop:4}' #' -> {check}' #' @{ndrop*2 if flags&1 else "never"}'
+        if flags & 0x80:
+            fset.add('D')
+        if (flags & 0x01) and not (flags & 0xc0):
+            fset.add('-')
+
+        if version <= 1:    # only had r!=0 for v==1 for a few hours on Feb 1
+            r = (flags >> 4) & 0x3
+            if version == 0 or self._ts < dt.datetime(2022,2,1,18,9):
+                fset.add(f'r={r}')
+                # breakpoint()
+        # fset.add(f'v={version}')
+
+        ftext = f'{",".join(sorted(fset))}'
+
+        if version != 0:
+            # remove /4.70 to change % to V, but we seem to think in % more
+            # so in this case it seems better to use that
+            stext = f'{start/4.70:2.0f}%{drop-start:3.0f}'
+        else:
+            SCALE = 1/1024*3.6*args.scaling
+            stext = f'{start*SCALE/4.7:3.0f}%{(drop-start)*SCALE:3.0f}'
+        self._text = (
+            # f'f={flags:02x} '
+            f'{ftext}'
+            f' {stext}{dtext}{rtext}{etext}'
+            )
+
+        results = extract('flags ndrop start drop check extra', locals())
+        return results
+
+
+
+class MarkRecord(Record):
+    rtype = 55   # LREC_MARK
+
+    def parse(self):
+        code, = struct.unpack_from('<B', self.data)
+        self._text = (
+            f'code={code}'
+            )
+
+        results = extract('code', locals())
+        return results
+
+
+
+class Energy2Record(Record):
+    rtype = 56  # LREC_ENERGY2
+
+    def parse(self):
+        if len(self.data) == 6:
+            fast, slow, sigma = struct.unpack_from('<HHH', self.data)
+            self._text = 'fast=%s slow=%s sigma=%s' % (fast, slow, sigma)
+
+            return dict(
+                fast=fast,
+                slow=slow,
+                sigma=sigma,
+                )
+        else:
+            try:
+                self._text = self.data[1:].hex()
+            except AttributeError:
+                self._text = hexlify(self.data[1:])
+
+            return {}
+
+
+
+class ZapCalRecord(Record):
+    rtype = 57  # LREC_ZAP_CAL
+
+    def parse(self):
+        try:
+            count, mins, maxs, drops = struct.unpack_from('<B10s10s10s', self.data)
+            drops =  struct.unpack('10b', drops)
+
+        except struct.error as ex:
+            count, mins, maxs = struct.unpack_from('<B10s10s', self.data)
+            drops = []
+
+        if self._last_version >= (6, 5, 9):
+            slopes = struct.unpack_from('<10h', mins + maxs)
+            scale = 0.692 if (5000 < sum(slopes) < 5700) else 0.478
+            # print('Cal', sum(slopes), ', '.join(f'{x*scale:.0f}' for x in slopes))
+            stext = ' slopes(V)=' + ','.join(f'{x*scale:.0f}' for x in slopes)
+            ltext = ' last(V)=' + ','.join(f'{x*scale:.0f}' for x in drops) if drops else ''
+            mtext = ''
+        else:
+            mins = struct.unpack('10b', mins)
+            maxs = struct.unpack('10b', maxs)
+            Record.LAST_CAL = list(maxs)
+            spans = [maxs[i] - mins[i] for i in range(len(mins))]
+            ltext = ' last=' + ', '.join(str(x) for x in drops) if drops else ''
+            mtext = ' maxs=' + ','.join(str(x) for x in maxs)
+            stext = ' spans=' + ','.join(str(x) for x in spans)
+
+        self._text = f'n={count}{mtext}{stext}{ltext}'
+
+        return dict(
+            count=count,
+            mins=mins,
+            maxs=maxs,
+            )
+
+
+
+class Probe2Record(Record):
+    rtype = 58   # LREC_PROBE2
+
+    MAXDELTA = [3, 3, 3, 4, 4, 4, 5, 5, 5, 6]
+    NEWDELTA = [2] * 10
+
+    def parse(self):
+        flags, level, thresh, drop = struct.unpack_from('<BBBB', self.data)
+        extra = self.data[4:]
+
+        fset = set()
+        version = (flags >> 6) & 0x3
+        if flags & 0x01:
+            fset.add('D')
+            stext = f'{level:3d}% {drop} >= {thresh}'
+        else:
+            # if self.LAST_CAL:
+            #     try:
+            #         assert thresh == self.MAXDELTA[-1] + self.LAST_CAL[-1]
+            #     except:
+            #         breakpoint()
+            #         pass
+            #     newthresh = self.LAST_CAL[-1] + 2
+            # else:
+            #     newthresh = 100
+            # if drop >= newthresh:
+            #     fset.add('*')
+            #     stext = f'{level:3d}% {drop} >= {newthresh}'
+            # else:
+                fset.add('-')
+                stext = f'{level:3d}% {drop} < {thresh}'
+
+        ftext = f'{",".join(sorted(fset))}'
+
+        if extra:
+            precs = struct.unpack_from(f'<{len(extra)}b', extra)
+            # try:
+            #     fixed = [self.MAXDELTA[i] - self.NEWDELTA[i] for i,p in enumerate(precs)]
+            # except TypeError:
+            #     breakpoint()
+            #     pass
+            # etext = ', misses: %s' % ','.join(f'{p}{"/"+str(p-f) if f>=p else ""}' for f, p in zip(fixed, precs))
+            etext = ', misses: %s' % ','.join(f'{p}' for p in precs)
+        else:
+            etext = ' '
+
+        self._text = (
+            f'{ftext} {stext}{etext}'
+            )
+
+        results = extract('flags level thresh drop', locals())
+        return results
 
 
 
@@ -1954,6 +2178,7 @@ if __name__ == '__main__':
         help='output non-compact JSON with indentation etc.')
     parser.add_argument('--filter', default='*')
     parser.add_argument('--raw', action='store_true')
+    parser.add_argument('--scaling', type=int, default=136)
     parser.add_argument('fid', nargs='?')
 
     args = parser.parse_args()
